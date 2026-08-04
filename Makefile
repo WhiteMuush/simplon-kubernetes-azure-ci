@@ -1,6 +1,3 @@
-# CI: build the image and push it to the ACR. Nothing else.
-# Configuration comes from .env locally, from CI/CD variables in the pipeline.
-
 -include .env
 export
 
