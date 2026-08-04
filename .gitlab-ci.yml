@@ -1,0 +1,71 @@
+stages:
+  - lint
+  - test
+  - build
+  - push
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
+  DOCKER_TLS_CERTDIR: "/certs"
+  IMAGE_NAME: microservices-app
+  IMAGE: $ACR_NAME.azurecr.io/$IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+
+cache:
+  key: go-mod
+  paths:
+    - .go/pkg/mod/
+
+lint:
+  stage: lint
+  image: golang:1.26
+  script:
+    - test -z "$(gofmt -l .)" || (gofmt -l .; exit 1)
+    - go vet ./...
+
+test:
+  stage: test
+  image: golang:1.26
+  script:
+    - go test ./...
+
+build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  script:
+    - docker build -t "$IMAGE" .
+
+azure-auth:
+  stage: build
+  image: mcr.microsoft.com/azure-cli:latest
+  id_tokens:
+    AZURE_ID_TOKEN:
+      aud: https://gitlab.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+      allow_failure: true
+  script:
+    - az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" --federated-token "$AZURE_ID_TOKEN"
+    - TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+    - echo "ACR_TOKEN=$TOKEN" > auth.env
+  artifacts:
+    reports:
+      dotenv: auth.env
+
+push:
+  stage: push
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs:
+    - azure-auth
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+      allow_failure: true
+  script:
+    - echo "$ACR_TOKEN" | docker login "$ACR_NAME.azurecr.io" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+    - docker build -t "$IMAGE" .
+    - docker push "$IMAGE"
