@@ -2,7 +2,7 @@ workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
-      when: never
+      when: never 
     - if: $CI_COMMIT_BRANCH
 
 stages:
@@ -26,7 +26,7 @@ lint:
   stage: lint
   image: golang:1.26
   script:
-    - test -z "$(gofmt -l .)" || (gofmt -l .; exit 1)
+    - UNFORMATTED=$(gofmt -l $(go list -f '{{.Dir}}' ./...)); if [ -n "$UNFORMATTED" ]; then echo "unformatted files"; echo "$UNFORMATTED"; exit 1; fi
     - go vet ./...
 
 test:
