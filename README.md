@@ -1,93 +1,111 @@
-# simplon-kubernetes-azure
+# <img src="https://cdn.simpleicons.org/go" height="28" alt="Go" align="center"/> Microservices on AKS: continuous integration <img src="https://cdn.simpleicons.org/gitlab" height="28" alt="GitLab" align="center"/>
 
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-distroless-2496ED?logo=docker&logoColor=white)
+![GitLab CI](https://img.shields.io/badge/GitLab-CI-FC6D26?logo=gitlab&logoColor=white)
+![Azure](https://img.shields.io/badge/Azure-ACR-0078D4?logo=microsoftazure&logoColor=white)
+![Status](https://img.shields.io/badge/status-deployed-brightgreen)
 
+Three Go microservices (API Gateway, Books, Movies) shipped as one distroless image. This repository owns the code and the build: lint, test, image, push to Azure Container Registry, then it hands the tag over to the deployment pipeline.
 
-## Getting started
+> Brief: [docs/CONSIGNES.md](docs/CONSIGNES.md)
+> Deployment repository: [simplon-kubernetes-azure-cd](https://gitlab.com/WhiteMuush/simplon-kubernetes-azure-cd)
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Why
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+Two decisions shape the whole pipeline.
 
-## Add your files
+**No registry password is ever stored.** GitLab mints a short-lived OIDC token (`id_tokens`), Azure trades it for a Service Principal session through workload identity federation, and `az acr login --expose-token` returns an ACR access token that expires within hours. The project variables hold identifiers only, never a secret.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+**One tag per commit, never `latest`.** The image is tagged `$CI_COMMIT_SHORT_SHA`. A moving tag makes rollback impossible: the Deployment spec never changes, so Kubernetes has nothing to roll. A unique tag makes every deployment traceable and reversible.
+
+The `deploy` stage deploys nothing here. It triggers the CD project with `TAG` as a variable, so a build job never holds cluster credentials.
+
+## Architecture
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/WhiteMuush/simplon-kubernetes-azure.git
-git branch -M main
-git push -uf origin main
+        one image  ─  three binaries  ─  three Deployments
+
+                gcr.io/distroless/static-debian12
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+          /app/api       /app/books      /app/movies
+       (LoadBalancer)    (ClusterIP)     (ClusterIP)
 ```
 
-## Integrate with your tools
+The image declares no `ENTRYPOINT`. Each Deployment sets `command` to pick the binary it runs, which keeps one build and one tag for the three services.
 
-* [Set up project integrations](https://gitlab.com/WhiteMuush/simplon-kubernetes-azure/-/settings/integrations)
+| App | Endpoint | Exposure |
+|---|---|---|
+| api | `GET /data` | LoadBalancer, aggregates the two others |
+| books | `GET /books` | ClusterIP |
+| movies | `GET /movies` | ClusterIP |
 
-## Collaborate with your team
+The gateway resolves its backends by Service DNS name, injected as `BOOKS_API_HOST=books:8080` and `MOVIES_API_HOST=movies:8080`.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## Pipeline
 
-## Test and Deploy
+```
+  merge request ──▶ lint ─ test ─ build
+  push on main  ──▶ lint ─ test ─ build ─ azure-auth ─ push ─ deploy (triggers CD)
+```
 
-Use the built-in continuous integration in GitLab.
+| Stage | Image | What it does |
+|---|---|---|
+| `lint` | `golang:1.26` | `gofmt -l` fails on unformatted files, then `go vet ./...` |
+| `test` | `golang:1.26` | `go test ./...` |
+| `build` | `docker:27` + dind | Builds the image, proving the Dockerfile is sound on every branch |
+| `azure-auth` | `azure-cli` | OIDC login, exports `ACR_TOKEN` as a dotenv artifact |
+| `push` | `docker:27` + dind | Logs into ACR with that token, pushes `:$CI_COMMIT_SHORT_SHA` |
+| `deploy` | trigger | Starts the CD pipeline with `TAG=$CI_COMMIT_SHORT_SHA` |
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Only `lint`, `test` and `build` run on merge requests. Everything touching Azure is gated on the default branch.
 
-***
+## Requirements
 
-# Editing this README
+Go 1.26, Docker, and the Azure CLI for local pushes.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+These CI/CD variables must exist in the project settings. None of them is a secret:
 
-## Suggestions for a good README
+| Variable | Example | Used by |
+|---|---|---|
+| `ACR_NAME` | `mpetitacr01` | image name, ACR login |
+| `AZURE_CLIENT_ID` | Service Principal app id | `az login --federated-token` |
+| `AZURE_TENANT_ID` | tenant of the subscription | `az login --federated-token` |
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+The Service Principal and its federated credential are created once on the Azure side, documented under [Azure setup](https://gitlab.com/WhiteMuush/simplon-kubernetes-azure-cd#azure-setup) in the CD repository.
 
-## Name
-Choose a self-explaining name for your project.
+## Local build
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+cp .env.example .env   # fill in ACR_NAME, .env is git-ignored
+make release           # az acr login, docker build, docker push
+make tags              # what the registry holds
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+`make help` lists every target. `TAG` defaults to the current commit SHA, the same tag the pipeline uses, so a local push and a pipeline push are interchangeable. `guard-env` stops the run when `ACR_NAME` is missing instead of building an image named `.azurecr.io/...`.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+![Repositories in the Azure Container Registry](docs/images/acr-repositories.png)
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+> **Docker-in-Docker**: the `build` and `push` jobs need the `docker:27-dind` service together with `DOCKER_TLS_CERTDIR: "/certs"`. Without that variable the client and the daemon disagree on TLS and the job dies on `Cannot connect to the Docker daemon`.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+> **ACR token login**: the username is the literal null GUID `00000000-0000-0000-0000-000000000000`. It is not a placeholder to fill in, it is how ACR recognises a token-based login.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Progress
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+| Step | Status |
+|---|---|
+| Azure environment: registry and cluster created | done |
+| Image built and pushed by hand from the workstation | done |
+| Manifests applied by hand, application reachable | done |
+| CI: lint, test, build, secretless push to ACR | done |
+| CD triggered by the CI with the commit tag | done |
+| Application reachable on the load balancer IP | done |
+| Access restricted to a single CIDR | done |
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Notes
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- A local orchestrator (`Makefile`, one level above, not versioned) chains this repo and the CD repo: `make ship` runs `release` here, then `deploy` there, with the same tag.
+- The pipeline never calls the `Makefile`. It repeats the build in its own jobs, so a broken `Makefile` cannot break the CI, and a missing runner cannot block a local push.
+- The distroless runtime ships no shell, so `docker run -it ... sh` is not available for debugging. Use `--entrypoint /app/api` or inspect the layers instead.

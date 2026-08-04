@@ -2,11 +2,9 @@ FROM golang:1.26 AS builder
 
 WORKDIR /app
 
-# Dependencies
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Build 
 COPY . .
 RUN CGO_ENABLED=0 go build -o api ./cmd/api
 RUN CGO_ENABLED=0 go build -o books ./cmd/books
